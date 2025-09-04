@@ -1,43 +1,55 @@
 import json
-import re
+import requests
+from io import BytesIO
+from PIL import Image, ImageEnhance
+import pytesseract
 
-# Load OCR results (downloaded + OCR text)
-with open("ocr_output.json", "r", encoding="utf-8") as f:
+def preprocess_image(img):
+    """Make image OCR-friendly."""
+    img = img.convert("L")  # grayscale
+    enhancer = ImageEnhance.Contrast(img)
+    img = enhancer.enhance(2.0)  # boost contrast
+    w, h = img.size
+    img = img.resize((w*2, h*2))  # upscale
+    return img
+
+# Read product data
+with open("amazon_products_with_all_images.json", "r", encoding="utf-8") as f:
     products = json.load(f)
 
 structured_data = []
 
-# Regex patterns for nutrition values
-patterns = {
-    "calories": r"(?:calories|energy)\s*[:\-]?\s*(\d+)",
-    "protein": r"protein\s*[:\-]?\s*(\d+\.?\d*)\s*g?",
-    "fat": r"(?:total\s+fat|fat)\s*[:\-]?\s*(\d+\.?\d*)\s*g?",
-    "carbs": r"(?:carbohydrate|carbohydrates|carbs)\s*[:\-]?\s*(\d+\.?\d*)\s*g?",
-    "sodium": r"sodium\s*[:\-]?\s*(\d+\.?\d*)\s*mg?"
-}
-
 for product in products:
-    # copy the full product (all keys: price, rating, error, etc.)
-    product_info = product.copy()
+    # Copy all existing keys
+    product_info = {**product}
+    product_info["ocr_text"] = []
 
-    # ensure nutrition is always present
-    if "nutrition" not in product_info:
-        product_info["nutrition"] = {}
+    for url in product.get("all_images", []):
+        try:
+            # Fetch image from URL (not saving to disk)
+            response = requests.get(url, timeout=15)
+            response.raise_for_status()
+            
+            img = Image.open(BytesIO(response.content))
+            img = preprocess_image(img)
 
-    # collect all OCR text from images
-    all_text = " ".join(img.get("ocr_text", "") for img in product.get("images", []))
-
-    # extract nutrition info
-    for key, pattern in patterns.items():
-        match = re.search(pattern, all_text, re.IGNORECASE)
-        if match:
-            product_info["nutrition"][key] = match.group(1)
+            # OCR extraction
+            text = pytesseract.image_to_string(img, lang="eng", config="--psm 6")
+            if text.strip():
+                product_info["ocr_text"].append({
+                    "url": url,
+                    "text": text.strip()
+                })
+        except Exception as e:
+            product_info["ocr_text"].append({
+                "url": url,
+                "error": str(e)
+            })
 
     structured_data.append(product_info)
 
-
-# Save structured output with all fields preserved
+# Save output JSON
 with open("structured_output.json", "w", encoding="utf-8") as f:
     json.dump(structured_data, f, indent=4, ensure_ascii=False)
 
-print("✅ Extracted nutrition info saved to structured_output.json (all keys preserved)")
+print("✅ OCR extraction complete (no images saved locally). Check structured_output.json")
